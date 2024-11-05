@@ -1,0 +1,167 @@
+---
+title: "TP - température à Samoylov"
+output: 
+  pdf_document:
+    fig_caption: yes
+    number_sections: true
+    citation_package: natbib
+---
+
+```{r packages, message = FALSE}
+library(tidyverse)
+```
+
+```{r knitr, include= FALSE}
+library(knitr)
+```
+
+1. Charger la base de données `borehole_Samoylov_byday.csv` et représenter sur
+un même graphe par profondeur les températures en fonction du temps. Que
+remarque-t-on ?
+
+```{r data, message = FALSE}
+samoylov = read_csv(file = "borehole_Samoylov_byday.csv", col_names = TRUE) %>% 
+  rename(Date = Date.Depth)
+samoylov_long = samoylov %>% 
+  gather("Depth", "Temperature", -Date) %>% 
+  mutate(Depth = as.numeric(substr(Depth, 2, nchar(Depth))))
+ggplot(samoylov_long) +
+  aes(x = Date, y = Temperature, col = as.factor(Depth)) +
+  geom_line() +
+  guides(color = guide_legend(title = "Depth"))
+```
+
+2. Créer une variable $D$ qui compte le nombre de jours écoulés depuis le 24-08-2006. 
+L’avantage d’introduire une telle variable est de prendre en compte plus
+facilement les deux périodes sans mesures. La base de données contient aussi
+6 valeurs manquantes (`NA`) que nous allons supprimer.
+
+```{r day_elapsed}
+origin = as.Date("24-08-2006", format = "%d-%m-%Y")
+samoylov = samoylov %>% 
+  mutate(day_elapsed = as.numeric(Date) - as.numeric(origin)) %>% 
+  drop_na()
+```
+
+3. Expliquer le choix de ce modèle.
+
+4. Implémenter ce modèle et commenter les résultats. On pourra interpréter, en
+fonction de la profondeur, la qualité d’ajustement du modèle aux observation
+et interpréter les coefficients $\widehat \beta_{N,1}$ estimés.
+
+```{r linear_model}
+samoylov = samoylov %>% 
+  mutate(cos = cos(2 * pi * day_elapsed / 365),
+         sin = sin(2 * pi * day_elapsed / 365))
+depths = samoylov %>% select(starts_with("X")) %>% names()
+
+models = map_dfr(depths, function(depth) {
+  outcome = pull(samoylov[,depth])
+  model = lm(outcome ~ day_elapsed + cos + sin, data = samoylov)
+  summ = summary(model)
+  coefs = summ$coefficients["day_elapsed",] %>% t() %>% as_tibble()
+  bind_cols(tibble(Depth = as.numeric(substr(depth, 2, nchar(depth))), 
+                   Model = list(model)), 
+            `Adj. R2` = summ$adj.r.squared, 
+            coefs)
+})
+
+models %>% 
+  select(Depth, `Adj. R2`) %>% 
+  kable(digits = 3)
+```
+
+```{r predictions}
+predictions = models %>% 
+  mutate(Predictions = map(Model, 
+                           ~ tibble(Date = samoylov$Date, 
+                                    Temperature = predict(.)))) %>% 
+  select(Depth, Predictions) %>% 
+  unnest(cols = c("Predictions"))
+
+df = bind_rows(samoylov_long %>% mutate(Origin = "True Data"),
+               predictions %>% mutate(Origin = "Predictions"))
+
+ggplot(df) +
+  aes(x = Date, y = Temperature, col = as.factor(Depth)) +
+  geom_line() +
+  facet_wrap(~ Origin, nrow = 1) +
+  guides(color = guide_legend(title = "Depth"))
+```
+
+5. Donner, par profondeur, l’augmentation annuelle moyenne de température. On
+donnera à chaque fois un intervalle de confiance et on regardera où se trouve
+la valeur 0 par rapport à cet intervalle. Mettre en regard ces résultats avec
+l’augmentation observée sur un siècle du pergélisol au niveau mondial.
+
+```{r beta_estimates}
+models_yearly = models %>% 
+  mutate(Estimate = 365 * Estimate, 
+         `Std. Error` = 365 * `Std. Error`,
+         `Lower CI` = Estimate - 1.96 * `Std. Error`,
+         `Upper CI` = Estimate + 1.96 * `Std. Error`)
+
+ggplot(models_yearly) +
+  aes(x = Depth, y = Estimate, ymin = `Lower CI`, ymax = `Upper CI`) +
+  geom_linerange() +
+  geom_point() +
+  coord_cartesian(ylim = c(0, NA))
+```
+
+```{r include = FALSE, eval = FALSE}
+models_yearly %>% 
+  mutate_if(is.numeric, ~ as.character(signif(., 3))) %>% 
+  select(Depth, R2, Estimate, `Std. Error`) %>% 
+  kable()
+```
+
+6. Etudier la qualité de ce modèle en prévision. Pour cela on pourra par exemple
+refaire tourner le modèle en laissant de coté une année complète, prédire cette
+année avec les coefficients estimés et calculer l’erreur de prévision associée.
+
+```{r quality}
+samoylov_truncated = samoylov %>% 
+  filter(Date <= max(Date) - 365)
+samoylov_last_year = samoylov %>% 
+  filter(Date > max(Date) - 365)
+samoylov_last_year_long = samoylov_last_year %>% 
+  gather("Depth", "Temperature", -Date, -day_elapsed, -cos, -sin) %>% 
+  mutate(Depth = as.numeric(substr(Depth, 2, nchar(Depth))))
+
+models = map_dfr(depths, function(depth) {
+  outcome = pull(samoylov_truncated[,depth])
+  model = lm(outcome ~ day_elapsed + cos + sin, data = samoylov_truncated)
+  summ = summary(model)
+  coefs = summ$coefficients["day_elapsed",] %>% t() %>% as_tibble()
+  bind_cols(tibble(Depth = as.numeric(substr(depth, 2, nchar(depth))), 
+                   Model = list(model)), 
+            R2 = summ$r.squared, 
+            coefs)
+})
+
+predictions = models %>% 
+  mutate(Predictions = map(Model, 
+    ~ tibble(Date = samoylov_last_year$Date, 
+             Temperature = predict(., newdata = samoylov_last_year)))) %>% 
+  select(Depth, Predictions) %>% 
+  unnest(cols = c("Predictions"))
+
+df = bind_rows(samoylov_last_year_long %>% mutate(Origin = "True Data"),
+               predictions %>% mutate(Origin = "Predictions"))
+
+ggplot(df) +
+  aes(x = Date, y = Temperature, col = as.factor(Depth)) +
+  geom_line() +
+  facet_wrap(~ Origin, nrow = 1) +
+  guides(color = guide_legend(title = "Depth"))
+```
+
+```{r mse}
+df %>% 
+  select(Date, Depth, Origin, Temperature) %>% 
+  spread(Origin, Temperature) %>% 
+  group_by(Depth) %>% 
+  summarise(MSE = mean((Predictions - `True Data`)^2)) %>% 
+  kable(digits = 3)
+```
+
